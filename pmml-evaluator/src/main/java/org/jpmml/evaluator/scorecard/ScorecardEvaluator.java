@@ -23,11 +23,9 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.stream.Collectors;
 
-import org.dmg.pmml.FieldName;
-import org.dmg.pmml.MathContext;
-import org.dmg.pmml.MiningFunction;
-import org.dmg.pmml.PMML;
+import org.dmg.pmml.*;
 import org.dmg.pmml.scorecard.Attribute;
 import org.dmg.pmml.scorecard.Characteristic;
 import org.dmg.pmml.scorecard.Characteristics;
@@ -156,9 +154,18 @@ public class ScorecardEvaluator extends ModelEvaluator<Scorecard> {
 			Double partialScore = null;
 
 			List<Attribute> attributes = characteristic.getAttributes();
+			// 设置缺失值
+			List<Attribute> missingAttribute = attributes.stream().filter(it -> {
+				if (it.getPredicate() instanceof SimplePredicate) {
+					SimplePredicate predicate = (SimplePredicate) it.getPredicate();
+					return SimplePredicate.Operator.IS_MISSING == predicate.getOperator();
+				}
+				return false;
+			}).collect(Collectors.toList());
+			
 			for(Attribute attribute : attributes){
 				Boolean status = PredicateUtil.evaluatePredicateContainer(attribute, context);
-				if(status == null || !status.booleanValue()){
+				if(status == null || !status){
 					continue;
 				}
 
@@ -213,8 +220,39 @@ public class ScorecardEvaluator extends ModelEvaluator<Scorecard> {
 
 			// "If not even a single Attribute evaluates to "true" for a given Characteristic, then the scorecard as a whole returns an invalid value"
 			if(partialScore == null){
-				throw new UndefinedResultException()
-					.ensureContext(characteristic);
+				if (!missingAttribute.isEmpty() && missingAttribute.get(0).getPartialScore() != null) {
+					Attribute attr = missingAttribute.get(0);
+					partialScore = attr.getPartialScore();
+					score.add(partialScore);
+					if(useReasonCodes){
+						String reasonCode = attr.getReasonCode();
+						if(reasonCode == null){
+							reasonCode = characteristic.getReasonCode();
+						} // End if
+
+						if(reasonCode == null){
+							throw new MissingAttributeException(attr, PMMLAttributes.ATTRIBUTE_REASONCODE);
+						}
+
+						double difference;
+
+						Scorecard.ReasonCodeAlgorithm reasonCodeAlgorithm = scorecard.getReasonCodeAlgorithm();
+						switch(reasonCodeAlgorithm){
+							case POINTS_ABOVE:
+								difference = (partialScore - baselineScore);
+								break;
+							case POINTS_BELOW:
+								difference = (baselineScore - partialScore);
+								break;
+							default:
+								throw new UnsupportedAttributeException(scorecard, reasonCodeAlgorithm);
+						}
+
+						reasonCodePoints.add(reasonCode, difference);
+					}
+				} else {
+					throw new UndefinedResultException().ensureContext(characteristic);
+				}
 			}
 		}
 
@@ -231,15 +269,15 @@ public class ScorecardEvaluator extends ModelEvaluator<Scorecard> {
 	private <V extends Number> ReasonCodeRanking<V> createReasonCodeRanking(TargetField targetField, Value<V> score, ValueMap<String, V> reasonCodePoints){
 		score = TargetUtil.evaluateRegressionInternal(targetField, score);
 
-		Collection<Map.Entry<String, Value<V>>> entrySet = reasonCodePoints.entrySet();
-		for(Iterator<Map.Entry<String, Value<V>>> it = entrySet.iterator(); it.hasNext(); ){
-			Map.Entry<String, Value<V>> entry = it.next();
-
-			Value<V> value = entry.getValue();
-			if(value.compareTo(0d) < 0){
-				it.remove();
-			}
-		}
+//		Collection<Map.Entry<String, Value<V>>> entrySet = reasonCodePoints.entrySet();
+//		for(Iterator<Map.Entry<String, Value<V>>> it = entrySet.iterator(); it.hasNext(); ){
+//			Map.Entry<String, Value<V>> entry = it.next();
+//
+//			Value<V> value = entry.getValue();
+//			if(value.compareTo(0d) < 0){
+//				it.remove();
+//			}
+//		}
 
 		return new ReasonCodeRanking<>(score, reasonCodePoints);
 	}
